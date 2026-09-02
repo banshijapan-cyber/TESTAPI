@@ -47,18 +47,23 @@ left to trip over.
 
 ## Known gap: the workday flag
 
-Column D of the template is read and shown in the ALV, but the recording
-in this program (`SZC_FACTORY_CALENDAR_MAINTAIN` screen `0215`) only
-fills `TIFAB-DATUMVON`, `TIFAB-DATUMBIS` and `TFAIT-LTEXT`. It never
-touches the workday / non-workday indicator, so every rule is created
-with the screen default.
+Column D of the template is read and shown in the ALV, but the
+recording never touches the workday / non-workday indicator, so every
+rule is created with the screen default.
+
+The recording settles **where** it is: not on `0215`, which carries
+only `TIFAB-DATUMVON`, `TIFAB-DATUMBIS` and `TFAIT-LTEXT`. It is a
+column of the special rules table control on screen `0210`, so the
+field name needs the row index of the inserted rule.
 
 To close it:
 
-1. In `SHDB`, record one special rule **with** "Workday" set and one
-   without it.
-2. Diff the two recordings and take the field name that differs.
-3. Put it into `gc_fld_workday` at the top of the program.
+1. Put the cursor on the **Workday** column of the special rules list
+   and press `F1` → *Technical information* to read the field name.
+2. Put it into `gc_fld_workday` at the top of the program, with the row
+   index — e.g. `TIFAB-XXXXX(01)`.
+
+It is then sent on screen `0210` just before `=SAVE`.
 
 Until then the ALV flags any row with `Workday = X` as a `WARNING`, in
 both simulation and update runs, so the gap is visible rather than
@@ -92,10 +97,10 @@ Row 1 is a header (configurable via *Header rows*), data starts in row 2.
 | `P_MODE` | Display mode for `CALL TRANSACTION`: `A` / `E` / `N` |
 | `P_UPDT` | Update mode: `S` synchronous, `A` asynchronous, `L` local |
 | `P_GROUP` | Batch input session name |
-| `P_PPROG` | Program of the information popup raised on save |
-| `P_PDYNP` | Screen number of that popup |
-| `P_POKCD` | OK code to acknowledge it (default `/00` = ENTER) |
-| `P_TRKORR` | Customizing request — normally leave empty, see below |
+| `P_FSEL` | Tick if `=&ILT` shows the *choose filter field* popup first |
+| `P_PPROG` | Program of the information popup raised on save (`SAPMSSY0`) |
+| `P_PDYNP` | Screen number of that popup (`0120`) |
+| `P_POKCD` | OK code to acknowledge it (`=DBAC`) |
 | `P_EXIT` | Append the screens that leave the transaction after the save |
 
 Start with `P_TEST`, then `P_CALL` with `P_MODE = 'A'` on a single row to
@@ -145,41 +150,20 @@ recording.
 
 ### The popup on save — and why there is no transport request
 
-That popup is a modal dialog belonging to its own program, and the
-program and screen number differ between releases, so they are entered
-on the selection screen rather than hard-coded:
+It is a **list shown in a dialog box**, which is why it appears in the
+recording as `SAPMSSY0` screen `0120` and not as a popup program, and
+why it carries print and find buttons. `=DBAC` is its green check.
+Those are the defaults of `P_PPROG` / `P_PDYNP` / `P_POKCD`; they stay
+on the selection screen so a system that raises something different can
+be corrected without a program change — the **Stopped on** column names
+what to enter.
 
-1. Run one row with `P_MODE = 'N'` and `P_PPROG` / `P_PDYNP` empty.
-2. Read the **Stopped on** column of the result list — it reports the
-   popup's program and screen, taken from message `00 344`.
-3. Type those two values into `P_PPROG` and `P_PDYNP` and run again.
-
-No program change is needed. If your system raises more than one
-popup, add the further screens as extra blocks in `build_bdc_tail`.
-
-Note what that popup actually says: the automatic recording of
-Customizing changes **does not cover** the holiday and factory
-calendar — it has its own transport connection (*Calendar → Transport*
-on the SCAL initial screen). So saving a special rule does **not**
-prompt for a Customizing request, and `P_TRKORR` should stay empty.
-Filling it inserts a screen that is never shown, which breaks the run
-exactly as a missing screen does. It is kept only for systems that were
-modified to record the calendar.
-
-Transporting the uploaded rules is a separate manual step: *Calendar →
-Transport* on the SCAL initial screen, after the upload.
-
-### Finding the screen it actually stopped on
-
-The result list has a **Stopped on** column. It is filled from message
-`00 344` *"No batch input data for screen &1 &2"*, which names the
-program and dynpro that had no data — that is the screen to add to
-`build_bdc_tail`.
-
-The earlier version collected only `E`/`A`/`X` messages. Message
-`00 344` is a status message, so it was discarded and all you saw was
-the bare return code. All messages are now kept, and any failure
-without an error message reports them with their type.
+Note what the popup says: the automatic recording of Customizing
+changes **does not cover** the holiday and factory calendar — it has
+its own transport connection. So saving a special rule never prompts
+for a Customizing request. Transporting the uploaded rules is a
+separate manual step: *Calendar → Transport* on the SCAL initial
+screen, after the upload.
 
 ### Getting the recording right
 
@@ -187,7 +171,56 @@ without an error message reports them with their type.
 way through to **leaving the transaction** — do not stop at the save,
 green-arrow back out until you are on the SAP menu. Then replace the
 `bdc_dynpro` / `bdc_field` blocks in `build_bdc` and `build_bdc_tail`
-with what was recorded.
+with what was recorded — but read the next section first.
+
+## Two things not to copy from a recording verbatim
+
+`SHDB` records **every input-ready field on the screen**, not only the
+ones you typed. Two entries in the supplied recording must not be
+replayed as-is, and both are deliberately left out of the program.
+
+### 1. The header fields on screen 0200 — the dangerous one
+
+The recording carries this on `SZC_FACTORY_CALENDAR_MAINTAIN` `0200`:
+
+```
+TFACT-LTEXT        016026LT1
+TFACD-VJAHR        2000
+TFACD-BJAHR        2099
+TFACD-HOCID        JP
+TFACD-BASIS        989
+TIFAB-MONTAG       X      ... TIFAB-FREITAG  X
+TIFAB-SAMSTAG      _      TIFAB-SONNTAG  _   TIFAB-FEIERTAG  _
+```
+
+That is the **definition of calendar A1** at recording time — validity
+2000–2099, holiday calendar JP, basis 989, Monday–Friday working.
+Sending it on every row would write A1's definition into every calendar
+the upload touches: wrong validity period, wrong holiday calendar,
+wrong working-week pattern, silently, on calendars you only meant to
+add one special rule to.
+
+Only `BDC_CURSOR` and `BDC_OKCODE = '=SRUL'` are sent. A field that is
+not supplied keeps whatever the screen already holds, which is exactly
+what is wanted. The same applies to the second `0200` in the back-out
+chain.
+
+### 2. The `=&IC1` double click on the unfiltered list
+
+The recording has an extra `=&IC1` on `SAPMSSY0` `0120` at cursor
+`02/05` before `=&ILT`. It navigated nowhere there — the next recorded
+screen is `0120` again — but `&IC1` is *choose*, and with different
+list content the same cursor position can open a calendar, putting the
+run one screen out of step. It is left out.
+
+## Fragile spots to watch
+
+| Spot | Why | Where |
+| --- | --- | --- |
+| `GC_CUR_FILTERED` = `04/03` | The cursor decides **which line** `=UPDA` opens. That is the whole reason the list is filtered by calendar ID first — with one line left, the data line sits at `04/03`. A wrong position opens the wrong calendar. | constant |
+| The filter field popup | The recording goes straight from `=&ILT` to the selection dialog because the filter field was already set from an earlier run — ALV keeps that per user. A user who has never filtered this list gets `SAPLSKBH 0830` first. Tick `P_FSEL`; **Stopped on** reports `SAPLSKBH 0830` when it happens. | `P_FSEL` |
+| Row index `(01)` | Assumes the newly inserted rule is the first line of the table control. | `build_bdc` |
+| Date format | The recording shows `2026.01.06`, i.e. the recording user has date format `4` (`YYYY.MM.DD`). Dates are converted with the **running** user's format, so this is not hard-coded. A batch input session runs under `SY-UNAME`, which is why `BDC_OPEN_GROUP` is called with it — a session processed under a user with a different date format would misread the dates. | `convert_date_external` |
 
 ### For background runs, prefer the session
 

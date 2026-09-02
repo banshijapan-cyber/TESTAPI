@@ -31,7 +31,13 @@
 *& SHDB recording, which must be recorded through to leaving SCAL.
 *&
 *& The popup's program and screen are entered on the selection screen
-*& (P_PPROG / P_PDYNP); the result list reports them in "Stopped on".
+*& (P_PPROG / P_PDYNP, defaulted from the recording); the result list
+*& reports them in "Stopped on" if they ever differ.
+*&
+*& Saving does NOT prompt for a Customizing request - the calendar is
+*& not covered by automatic recording of changes and has its own
+*& transport connection (Calendar -> Transport on the SCAL initial
+*& screen). That is a separate manual step after the upload.
 *&---------------------------------------------------------------------*
 
 REPORT zfc_upload_special_rule.
@@ -42,12 +48,24 @@ REPORT zfc_upload_special_rule.
 CONSTANTS:
   gc_tcode       TYPE tcode        VALUE 'SCAL',
 
-* SCAL screen 0215 field that carries the workday indicator.
-* The stock recording below does NOT contain it, so column D of the
-* template cannot be transferred until this is filled in. Record one
-* special rule with "Workday" ticked and one without it in SHDB, diff
-* the two recordings, and put the differing field name here.
-  gc_fld_workday TYPE bdcdata-fnam VALUE IS INITIAL.
+* Field that carries the workday indicator.
+*
+* The recording proves it is not on screen 0215 - that screen has only
+* the two dates and the text. It is a column of the special rules table
+* control on screen 0210, so the name needs the row index of the newly
+* inserted rule, e.g. 'TIFAB-XXXXX(01)'. Put the cursor on the workday
+* column of the special rules list and press F1 -> Technical
+* information to read the field name.
+*
+* Until this is filled in, column D of the template cannot be
+* transferred and affected rows are flagged as WARNING.
+  gc_fld_workday   TYPE bdcdata-fnam VALUE IS INITIAL,
+
+* Cursor positions in the calendar list (SAPMSSY0 0120). The second one
+* decides which line =UPDA opens in change mode, so it has to point at
+* the single data line the calendar ID filter leaves behind.
+  gc_cur_unfiltered TYPE char10 VALUE '02/05',
+  gc_cur_filtered   TYPE char10 VALUE '04/03'.
 
 *---------------------------------------------------------------------*
 * Selection screen
@@ -77,11 +95,11 @@ SELECTION-SCREEN END OF BLOCK b2.
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-003.
 
 PARAMETERS:
-  p_pprog TYPE bdcdata-program,
-  p_pdynp TYPE bdcdata-dynpro,
-  p_pokcd TYPE char20 DEFAULT '/00',
-  p_trkorr TYPE trkorr,
-  p_exit   AS CHECKBOX DEFAULT 'X'.
+  p_fsel  AS CHECKBOX,
+  p_pprog TYPE bdcdata-program DEFAULT 'SAPMSSY0',
+  p_pdynp TYPE bdcdata-dynpro  DEFAULT '0120',
+  p_pokcd TYPE char20          DEFAULT '=DBAC',
+  p_exit  AS CHECKBOX DEFAULT 'X'.
 
 SELECTION-SCREEN END OF BLOCK b3.
 
@@ -821,6 +839,13 @@ ENDFORM.
 
 *---------------------------------------------------------------------*
 * Build the SCAL BDC for one row
+*
+* Taken from the SHDB recording of 2026 01 06 - 2026 01 08 on calendar
+* A1, with two deliberate differences, both marked below:
+*
+*   - the header fields the recording captured on screen 0200 are NOT
+*     replayed (they would overwrite the calendar definition),
+*   - the no-op double click (=&IC1) on the unfiltered list is dropped.
 *---------------------------------------------------------------------*
 FORM build_bdc
   USING
@@ -834,7 +859,10 @@ FORM build_bdc
 
 *---------------------------------------------------------------------*
 * Dates have to reach the screen in the date format of the user who
-* runs the BDC, not in the internal YYYYMMDD representation.
+* runs the BDC, not in the internal YYYYMMDD representation. The
+* recording shows 2026.01.06, i.e. the recording user had date format
+* 4 (YYYY.MM.DD) - which is exactly why this is converted per user
+* instead of being formatted with a fixed pattern.
 *---------------------------------------------------------------------*
   PERFORM convert_date_external
     USING    is_input-date_from
@@ -845,7 +873,7 @@ FORM build_bdc
     CHANGING lv_to_ext.
 
 *---------------------------------------------------------------------*
-* SCAL - initial screen
+* SCAL - initial screen, maintain factory calendar
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SAPMSFT0' '0100'.
   PERFORM bdc_field  USING 'BDC_CURSOR'    'FMEN-FABKAL'.
@@ -854,26 +882,42 @@ FORM build_bdc
   PERFORM bdc_field  USING 'FMEN-FABKAL'   'X'.
 
 *---------------------------------------------------------------------*
-* Calendar list
+* Calendar list - set filter
+*
+* The recording has an extra =&IC1 (double click) on this screen before
+* =&ILT. It navigated nowhere there - the next recorded screen is 0120
+* again - but a double click on a list is "choose": with a different
+* list content the same cursor position can open a calendar, and the
+* run would then be one screen out of step. It is left out.
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SAPMSSY0' '0120'.
-  PERFORM bdc_field  USING 'BDC_CURSOR' '26/03'.
+  PERFORM bdc_field  USING 'BDC_CURSOR' gc_cur_unfiltered.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=&ILT'.
 
 *---------------------------------------------------------------------*
-* Select filter field
+* Choose the filter field
+*
+* The recording goes straight from =&ILT to the selection dialog,
+* because the filter field was already set from an earlier run - ALV
+* keeps that per user. On a user who has never filtered this list, the
+* field selection popup comes first. Switch P_FSEL on in that case;
+* the result list names SAPLSKBH 0830 in "Stopped on" when it happens.
 *---------------------------------------------------------------------*
-  PERFORM bdc_dynpro USING 'SAPLSKBH' '0830'.
-  PERFORM bdc_field  USING 'BDC_CURSOR' 'GT_FIELD_LIST-SELTEXT(01)'.
-  PERFORM bdc_field  USING 'BDC_OKCODE' '=WLSE'.
-  PERFORM bdc_field  USING 'GT_FIELD_LIST-MARK(01)' 'X'.
+  IF p_fsel = abap_true.
 
-  PERFORM bdc_dynpro USING 'SAPLSKBH' '0830'.
-  PERFORM bdc_field  USING 'BDC_CURSOR' 'GT_FIELD_LIST-SELTEXT(01)'.
-  PERFORM bdc_field  USING 'BDC_OKCODE' '=CONT'.
+    PERFORM bdc_dynpro USING 'SAPLSKBH' '0830'.
+    PERFORM bdc_field  USING 'BDC_CURSOR' 'GT_FIELD_LIST-SELTEXT(01)'.
+    PERFORM bdc_field  USING 'BDC_OKCODE' '=WLSE'.
+    PERFORM bdc_field  USING 'GT_FIELD_LIST-MARK(01)' 'X'.
+
+    PERFORM bdc_dynpro USING 'SAPLSKBH' '0830'.
+    PERFORM bdc_field  USING 'BDC_CURSOR' 'GT_FIELD_LIST-SELTEXT(01)'.
+    PERFORM bdc_field  USING 'BDC_OKCODE' '=CONT'.
+
+  ENDIF.
 
 *---------------------------------------------------------------------*
-* Exact Calendar ID filter
+* Filter value = calendar ID
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SAPLSSEL' '1104'.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=CRET'.
@@ -883,45 +927,68 @@ FORM build_bdc
   PERFORM bdc_field  USING '%%DYN001-LOW' is_input-ident.
 
 *---------------------------------------------------------------------*
-* Apply filter
+* Filtered list - open the calendar in change mode
+*
+* The cursor decides WHICH line =UPDA opens, so this position is what
+* makes the filter necessary: with exactly one calendar left, the data
+* line sits at 04/03. If the list layout differs in your system, adjust
+* GC_CUR_FILTERED - a wrong position opens the wrong calendar.
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SAPMSSY0' '0120'.
-  PERFORM bdc_field  USING 'BDC_CURSOR' '26/03'.
+  PERFORM bdc_field  USING 'BDC_CURSOR' gc_cur_filtered.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=UPDA'.
 
 *---------------------------------------------------------------------*
-* Factory Calendar Maintenance - 0200
+* Calendar definition -> special rules
+*
+* The recording also carries TFACT-LTEXT, TFACD-VJAHR, TFACD-BJAHR,
+* TFACD-HOCID, TFACD-BASIS and TIFAB-MONTAG..FEIERTAG here. SHDB
+* records every input-ready field on the screen, not only the ones that
+* were typed, so those are the values of calendar A1 at recording time:
+* validity 2000-2099, holiday calendar JP, basis 989, Mon-Fri working.
+*
+* Replaying them would write A1's definition into every calendar the
+* upload touches. They are deliberately NOT sent - a field that is not
+* supplied keeps the value the screen already holds, which is what is
+* wanted when only a special rule is being added.
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0200'.
   PERFORM bdc_field  USING 'BDC_CURSOR' 'TFACT-LTEXT'.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=SRUL'.
 
 *---------------------------------------------------------------------*
-* Special Rules - 0210
+* Special rules - insert
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0210'.
   PERFORM bdc_field  USING 'BDC_CURSOR' 'TFACT-LTEXT'.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=INS'.
 
 *---------------------------------------------------------------------*
-* Insert Special Rule - 0215
+* Insert special rule
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0215'.
-  PERFORM bdc_field  USING 'BDC_CURSOR'       'TFAIT-LTEXT'.
-  PERFORM bdc_field  USING 'BDC_OKCODE'       '=RINS'.
-  PERFORM bdc_field  USING 'TIFAB-DATUMVON'   lv_from_ext.
-  PERFORM bdc_field  USING 'TIFAB-DATUMBIS'   lv_to_ext.
-  PERFORM bdc_field  USING 'TFAIT-LTEXT'      is_input-text.
+  PERFORM bdc_field  USING 'BDC_CURSOR'     'TFAIT-LTEXT'.
+  PERFORM bdc_field  USING 'BDC_OKCODE'     '=RINS'.
+  PERFORM bdc_field  USING 'TIFAB-DATUMVON' lv_from_ext.
+  PERFORM bdc_field  USING 'TIFAB-DATUMBIS' lv_to_ext.
+  PERFORM bdc_field  USING 'TFAIT-LTEXT'    is_input-text.
+
+*---------------------------------------------------------------------*
+* Special rules - save
+*
+* This is where the workday indicator belongs: the recording proves it
+* is not on screen 0215, which carries only the two dates and the text.
+* It is a column of the special rules table control on 0210, so the
+* field name needs the row index, e.g. TIFAB-XXXXX(01). See
+* GC_FLD_WORKDAY at the top.
+*---------------------------------------------------------------------*
+  PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0210'.
+  PERFORM bdc_field  USING 'BDC_CURSOR' 'TIFAB-DATUMVON(01)'.
 
   IF gc_fld_workday IS NOT INITIAL.
     PERFORM bdc_field USING gc_fld_workday is_input-workday.
   ENDIF.
 
-*---------------------------------------------------------------------*
-* Special Rules - SAVE
-*---------------------------------------------------------------------*
-  PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0210'.
-  PERFORM bdc_field  USING 'BDC_CURSOR' 'TIFAB-DATUMVON(01)'.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=SAVE'.
 
   PERFORM build_bdc_tail.
@@ -932,37 +999,27 @@ ENDFORM.
 * Everything that still happens after =SAVE
 *
 * Batch input does not stop when the data is saved - it stops when the
-* TRANSACTION ends. Every screen that SCAL still shows after the save
-* needs its own entry here, otherwise the run dies with SY-SUBRC = 1001
-* ("no batch input data for screen ...") in the background and simply
-* halts on that screen in the foreground.
-*
-* The two blocks below are the usual tail. VERIFY THEM against an SHDB
-* recording of your own system that was recorded through to leaving
-* SCAL - the screen numbers and OK codes are release-dependent, and a
-* mismatch is reported in the "Stopped on" column of the result list.
+* TRANSACTION ends. Every screen SCAL still shows after the save needs
+* its own entry here, otherwise the run dies with SY-SUBRC = 1001 ("no
+* batch input data for screen ...") in the background and simply halts
+* on that screen in the foreground.
 *---------------------------------------------------------------------*
 FORM build_bdc_tail.
 
 *---------------------------------------------------------------------*
-* Information popup on save
+* Information popup raised by the save
 *
 *   "Transporting the holiday and factory calendar
 *    The automatic recording of customizing changes does not include
 *    the holiday and factory calendar. ..."
 *
-* It only has to be acknowledged - ENTER ('/00') is what the green
-* check does. The popup is a modal dialog of its own program, and that
-* program and screen number differ between releases, so they are not
-* hard-coded here:
+* It is a list shown in a dialog box, which is why it appears in the
+* recording as SAPMSSY0 0120 rather than as a popup program, and why it
+* carries the print and find buttons. =DBAC is its green check.
 *
-*   1. Run one row with P_MODE = 'N' and P_PPROG / P_PDYNP empty.
-*   2. Read the "Stopped on" column of the result list - it reports the
-*      popup's program and screen from message 00 344.
-*   3. Type those two values into P_PPROG and P_PDYNP and run again.
-*
-* No program change is needed for this. If your system raises more than
-* one popup, add the further screens as extra blocks below.
+* Defaults come from the recording; they stay on the selection screen
+* so a system that raises a different popup can be corrected without a
+* program change - the "Stopped on" column names what to enter.
 *---------------------------------------------------------------------*
   IF p_pprog IS NOT INITIAL
      AND p_pdynp IS NOT INITIAL.
@@ -973,51 +1030,35 @@ FORM build_bdc_tail.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Prompt for Customizing request
+* Leave the transaction
 *
-* Normally NOT raised: the popup quoted above states that the automatic
-* recording of Customizing changes does not cover the holiday and
-* factory calendar - the calendar has its own transport connection
-* (Calendar -> Transport on the SCAL initial screen), so saving a
-* special rule does not ask for a request.
+*   0210 -> 0200 -> calendar list -> SCAL initial screen -> out
 *
-* P_TRKORR should therefore stay empty. It is kept only for systems
-* that were modified to record the calendar; filling it in a system
-* that does not raise the popup inserts a screen that is never shown,
-* which breaks the run just as surely as a missing one.
-*---------------------------------------------------------------------*
-  IF p_trkorr IS NOT INITIAL.
-
-    PERFORM bdc_dynpro USING 'SAPLSTRD' '0300'.
-    PERFORM bdc_field  USING 'BDC_CURSOR'   'KO008-TRKORR'.
-    PERFORM bdc_field  USING 'BDC_OKCODE'   '=LOCK'.
-    PERFORM bdc_field  USING 'KO008-TRKORR' p_trkorr.
-
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* Back out of the transaction
-*
-* Reverse of the forward path:
-*   0210 -> 0200 -> calendar list (SAPMSSY0 0120) -> SAPMSFT0 0100
+* The header fields the recording captured on 0200 are left out here
+* for the same reason as in BUILD_BDC.
 *---------------------------------------------------------------------*
   IF p_exit = abap_true.
 
     PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0210'.
+    PERFORM bdc_field  USING 'BDC_CURSOR' 'TIFAB-DATUMVON(01)'.
     PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
 
     PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0200'.
+    PERFORM bdc_field  USING 'BDC_CURSOR' 'TFACT-LTEXT'.
     PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
 
     PERFORM bdc_dynpro USING 'SAPMSSY0' '0120'.
-    PERFORM bdc_field  USING 'BDC_OKCODE' '=RW'.
+    PERFORM bdc_field  USING 'BDC_CURSOR' gc_cur_filtered.
+    PERFORM bdc_field  USING 'BDC_OKCODE' '=&F03'.
 
     PERFORM bdc_dynpro USING 'SAPMSFT0' '0100'.
+    PERFORM bdc_field  USING 'BDC_CURSOR' 'TEXT_01_CALENDAR'.
     PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
 
   ENDIF.
 
 ENDFORM.
+
 
 *---------------------------------------------------------------------*
 * Run the BDC with CALL TRANSACTION
