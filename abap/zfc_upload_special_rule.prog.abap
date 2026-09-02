@@ -21,6 +21,14 @@
 *&   - The update is performed through the SCAL BDC recording.
 *&   - The recording supports INSERT only; existing special rules
 *&     are reported and skipped.
+*&
+*& The BDC has to drive SCAL until the transaction ENDS, not until the
+*& data is saved. If the BDC data runs out while a screen is still
+*& active, CALL TRANSACTION terminates with SY-SUBRC = 1001 (in the
+*& foreground the run simply stops on that screen and waits). The tail
+*& in FORM BUILD_BDC_TAIL covers the Customizing request popup and the
+*& way back out of the transaction - verify it against your own SHDB
+*& recording, which must be recorded through to leaving SCAL.
 *&---------------------------------------------------------------------*
 
 REPORT zfc_upload_special_rule.
@@ -62,6 +70,14 @@ PARAMETERS:
   p_group TYPE apqi-groupid       DEFAULT 'ZFC_SPRUL' MODIF ID ses.
 
 SELECTION-SCREEN END OF BLOCK b2.
+
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-003.
+
+PARAMETERS:
+  p_trkorr TYPE trkorr,
+  p_exit   AS CHECKBOX DEFAULT 'X'.
+
+SELECTION-SCREEN END OF BLOCK b3.
 
 *---------------------------------------------------------------------*
 * Excel raw data
@@ -112,6 +128,7 @@ TYPES:
     tfait_j   TYPE char20,
     action    TYPE char30,
     status    TYPE char20,
+    screen    TYPE char40,
     message   TYPE char255,
   END OF ty_result.
 
@@ -526,7 +543,8 @@ FORM validate_and_process.
     lv_dummy   TYPE tfain-ident,
     lv_jahr    TYPE tfain-jahr,
     lv_success TYPE abap_bool,
-    lv_message TYPE char255.
+    lv_message TYPE char255,
+    lv_screen  TYPE char40.
 
   LOOP AT gt_input INTO gs_input.
 
@@ -741,7 +759,7 @@ FORM validate_and_process.
 *---------------------------------------------------------------------*
 * Execute SCAL BDC
 *---------------------------------------------------------------------*
-    CLEAR: lv_success, lv_message.
+    CLEAR: lv_success, lv_message, lv_screen.
 
     PERFORM build_bdc USING gs_input.
 
@@ -763,7 +781,9 @@ FORM validate_and_process.
     ELSE.
 
       PERFORM run_call_transaction
-        CHANGING lv_success lv_message.
+        CHANGING lv_success lv_message lv_screen.
+
+      gs_result-screen = lv_screen.
 
       IF lv_success = abap_true.
         gs_result-action  = 'Created'.
@@ -898,6 +918,65 @@ FORM build_bdc
   PERFORM bdc_field  USING 'BDC_CURSOR' 'TIFAB-DATUMVON(01)'.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=SAVE'.
 
+  PERFORM build_bdc_tail.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Everything that still happens after =SAVE
+*
+* Batch input does not stop when the data is saved - it stops when the
+* TRANSACTION ends. Every screen that SCAL still shows after the save
+* needs its own entry here, otherwise the run dies with SY-SUBRC = 1001
+* ("no batch input data for screen ...") in the background and simply
+* halts on that screen in the foreground.
+*
+* The two blocks below are the usual tail. VERIFY THEM against an SHDB
+* recording of your own system that was recorded through to leaving
+* SCAL - the screen numbers and OK codes are release-dependent, and a
+* mismatch is reported in the "Stopped on" column of the result list.
+*---------------------------------------------------------------------*
+FORM build_bdc_tail.
+
+*---------------------------------------------------------------------*
+* Prompt for Customizing request
+*
+* The factory calendar is cross-client Customizing, so a client with
+* automatic recording of changes asks for a transport request on save.
+* Leave P_TRKORR empty if your client does not record changes - the
+* popup is then not raised and must not be in the BDC either.
+*---------------------------------------------------------------------*
+  IF p_trkorr IS NOT INITIAL.
+
+    PERFORM bdc_dynpro USING 'SAPLSTRD' '0300'.
+    PERFORM bdc_field  USING 'BDC_CURSOR'   'KO008-TRKORR'.
+    PERFORM bdc_field  USING 'BDC_OKCODE'   '=LOCK'.
+    PERFORM bdc_field  USING 'KO008-TRKORR' p_trkorr.
+
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Back out of the transaction
+*
+* Reverse of the forward path:
+*   0210 -> 0200 -> calendar list (SAPMSSY0 0120) -> SAPMSFT0 0100
+*---------------------------------------------------------------------*
+  IF p_exit = abap_true.
+
+    PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0210'.
+    PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
+
+    PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0200'.
+    PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
+
+    PERFORM bdc_dynpro USING 'SAPMSSY0' '0120'.
+    PERFORM bdc_field  USING 'BDC_OKCODE' '=RW'.
+
+    PERFORM bdc_dynpro USING 'SAPMSFT0' '0100'.
+    PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
+
+  ENDIF.
+
 ENDFORM.
 
 *---------------------------------------------------------------------*
@@ -906,14 +985,16 @@ ENDFORM.
 FORM run_call_transaction
   CHANGING
     cv_success TYPE abap_bool
-    cv_message TYPE char255.
+    cv_message TYPE char255
+    cv_screen  TYPE char40.
 
   DATA:
-    ls_opt     TYPE ctu_params,
-    lv_subrc   TYPE sy-subrc,
-    lv_error   TYPE char255.
+    ls_opt   TYPE ctu_params,
+    lv_subrc TYPE sy-subrc,
+    lv_error TYPE char255,
+    lv_all   TYPE char255.
 
-  CLEAR: cv_success, cv_message.
+  CLEAR: cv_success, cv_message, cv_screen.
 
   ls_opt-dismode = p_mode.
   ls_opt-updmode = p_updt.
@@ -927,7 +1008,8 @@ FORM run_call_transaction
 
   lv_subrc = sy-subrc.
 
-  PERFORM get_bdc_error CHANGING lv_error.
+  PERFORM collect_bdc_messages
+    CHANGING lv_error lv_all cv_screen.
 
 * SY-SUBRC on its own is not a reliable success indicator for a BDC:
 * an error message collected during the transaction means the rule was
@@ -938,11 +1020,33 @@ FORM run_call_transaction
   ENDIF.
 
   cv_success = abap_false.
-  cv_message = lv_error.
 
-  IF cv_message IS INITIAL.
+*---------------------------------------------------------------------*
+* SY-SUBRC = 1001 means the transaction was still running when the BDC
+* data ran out. On its own that number says nothing, so the screen the
+* run stopped on and every collected message are reported with it.
+*---------------------------------------------------------------------*
+  IF cv_screen IS NOT INITIAL.
+
     cv_message =
-      |CALL TRANSACTION { gc_tcode } failed. SY-SUBRC = { lv_subrc }|.
+      |BDC data ends while screen { cv_screen } is still active | &&
+      |(SY-SUBRC = { lv_subrc }). Add this screen to FORM | &&
+      |BUILD_BDC_TAIL.|.
+
+  ELSEIF lv_error IS NOT INITIAL.
+
+    cv_message = lv_error.
+
+  ELSEIF lv_all IS NOT INITIAL.
+
+    cv_message = |SY-SUBRC = { lv_subrc }: { lv_all }|.
+
+  ELSE.
+
+    cv_message =
+      |CALL TRANSACTION { gc_tcode } failed. SY-SUBRC = { lv_subrc }. | &&
+      |No message was returned - run again with P_MODE = 'A'.|.
+
   ENDIF.
 
 ENDFORM.
@@ -1152,25 +1256,39 @@ FORM convert_date_external
 ENDFORM.
 
 *---------------------------------------------------------------------*
-* Collect the BDC error messages of the last CALL TRANSACTION
+* Collect the messages of the last CALL TRANSACTION
 *
-* Only real errors are collected:
-*   E = Error   A = Abort   X = Exit
-* Status messages such as "Filter set" are ignored.
+*   CV_ERROR  - only E / A / X, the messages that mean "not saved"
+*   CV_ALL    - every message, so a failure without an error message
+*               can still be diagnosed
+*   CV_SCREEN - program and dynpro the run stopped on, taken from
+*               message 00 344 "No batch input data for screen &1 &2"
+*
+* The original version collected E / A / X only. Message 00 344 is
+* raised as a status message, so a run that died with SY-SUBRC = 1001
+* produced an empty message and the bare return code.
 *---------------------------------------------------------------------*
-FORM get_bdc_error
+FORM collect_bdc_messages
   CHANGING
-    cv_message TYPE char255.
+    cv_error  TYPE char255
+    cv_all    TYPE char255
+    cv_screen TYPE char40.
 
   DATA:
     lv_text TYPE char255.
 
-  CLEAR cv_message.
+  CLEAR: cv_error, cv_all, cv_screen.
 
-  LOOP AT gt_bdcmsg INTO gs_bdcmsg
-    WHERE msgtyp = 'E'
-       OR msgtyp = 'A'
-       OR msgtyp = 'X'.
+  LOOP AT gt_bdcmsg INTO gs_bdcmsg.
+
+*---------------------------------------------------------------------*
+* "No batch input data for screen &1 &2" - the missing screen
+*---------------------------------------------------------------------*
+    IF gs_bdcmsg-msgid = '00'
+       AND gs_bdcmsg-msgnr = '344'.
+      cv_screen = |{ gs_bdcmsg-msgv1 } { gs_bdcmsg-msgv2 }|.
+      CONDENSE cv_screen.
+    ENDIF.
 
     CLEAR lv_text.
 
@@ -1192,10 +1310,22 @@ FORM get_bdc_error
       lv_text = |{ gs_bdcmsg-msgid }{ gs_bdcmsg-msgnr }|.
     ENDIF.
 
-    IF cv_message IS INITIAL.
-      cv_message = lv_text.
+    lv_text = |{ gs_bdcmsg-msgtyp }: { lv_text }|.
+
+    IF cv_all IS INITIAL.
+      cv_all = lv_text.
     ELSE.
-      cv_message = |{ cv_message } \| { lv_text }|.
+      cv_all = |{ cv_all } \| { lv_text }|.
+    ENDIF.
+
+    CHECK gs_bdcmsg-msgtyp = 'E'
+       OR gs_bdcmsg-msgtyp = 'A'
+       OR gs_bdcmsg-msgtyp = 'X'.
+
+    IF cv_error IS INITIAL.
+      cv_error = lv_text.
+    ELSE.
+      cv_error = |{ cv_error } \| { lv_text }|.
     ENDIF.
 
   ENDLOOP.

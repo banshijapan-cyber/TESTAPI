@@ -92,13 +92,16 @@ Row 1 is a header (configurable via *Header rows*), data starts in row 2.
 | `P_MODE` | Display mode for `CALL TRANSACTION`: `A` / `E` / `N` |
 | `P_UPDT` | Update mode: `S` synchronous, `A` asynchronous, `L` local |
 | `P_GROUP` | Batch input session name |
+| `P_TRKORR` | Customizing request for the save popup (blank = no popup expected) |
+| `P_EXIT` | Append the screens that leave the transaction after the save |
 
 Start with `P_TEST`, then `P_CALL` with `P_MODE = 'A'` on a single row to
 confirm the recording still matches your release, then switch to `'N'`
 for the mass run. For a large file `P_SESS` is the safer option — every
 failing transaction stays in `SM35` and can be reprocessed.
 
-Text symbols to maintain: `TEXT-001` (*File*), `TEXT-002` (*Processing*).
+Text symbols to maintain: `TEXT-001` (*File*), `TEXT-002`
+(*Processing*), `TEXT-003` (*BDC end of transaction*).
 
 ## Scope
 
@@ -109,3 +112,61 @@ Text symbols to maintain: `TEXT-001` (*File*), `TEXT-002` (*Processing*).
 - The screen sequence is release-dependent. If `CALL TRANSACTION` stops
   on an unexpected screen, re-record in `SHDB` and replace the
   `bdc_dynpro` / `bdc_field` block in `FORM build_bdc`.
+
+## Troubleshooting
+
+### `SY-SUBRC = 1001` in background, foreground stops at the save
+
+Batch input does not stop when the data is **saved**, it stops when the
+**transaction ends**. If the BDC data runs out while a screen is still
+active, `CALL TRANSACTION` terminates with `SY-SUBRC = 1001`; in the
+foreground (`P_MODE = 'A'`/`'E'`) there is nothing left to feed the
+screen, so the run just halts there and waits for you.
+
+The original recording ended on `=SAVE`. Everything SCAL still shows
+after that had no BDC data, which produces exactly those two symptoms.
+`FORM build_bdc_tail` now supplies it:
+
+1. **Prompt for Customizing request** (`SAPLSTRD` screen `0300`). The
+   factory calendar is cross-client Customizing, so a client that
+   records changes asks for a transport request on save — and a
+   background job cannot answer it. Enter the request in `P_TRKORR`.
+   If your client does *not* record changes the popup is never raised
+   and `P_TRKORR` must stay empty, otherwise the extra screen becomes
+   the mismatch.
+2. **The way back out** — `0210` → `0200` → the calendar list → `0100`,
+   controlled by `P_EXIT`.
+
+The screen numbers and OK codes in that tail are release-dependent and
+are a best guess. Verify them against your own recording.
+
+### Finding the screen it actually stopped on
+
+The result list has a **Stopped on** column. It is filled from message
+`00 344` *"No batch input data for screen &1 &2"*, which names the
+program and dynpro that had no data — that is the screen to add to
+`build_bdc_tail`.
+
+The earlier version collected only `E`/`A`/`X` messages. Message
+`00 344` is a status message, so it was discarded and all you saw was
+the bare return code. All messages are now kept, and any failure
+without an error message reports them with their type.
+
+### Getting the recording right
+
+`SHDB` is the ground truth. Record from the SCAL start screen all the
+way through to **leaving the transaction** — do not stop at the save,
+green-arrow back out until you are on the SAP menu. Then replace the
+`bdc_dynpro` / `bdc_field` blocks in `build_bdc` and `build_bdc_tail`
+with what was recorded.
+
+### For background runs, prefer the session
+
+`P_SESS` writes a batch input session instead of calling the
+transaction. Process it in `SM35` with *Display errors only*: when a
+screen has no data the session stops and shows it to you, you complete
+it by hand, and the screen you had to fill in is the one missing from
+the program. It is also the safer option for a large file — every
+failing transaction stays in the session and can be reprocessed,
+whereas `CALL TRANSACTION` in a background job with a popup it cannot
+answer will fail every single row the same way.
