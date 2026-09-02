@@ -26,9 +26,12 @@
 *& data is saved. If the BDC data runs out while a screen is still
 *& active, CALL TRANSACTION terminates with SY-SUBRC = 1001 (in the
 *& foreground the run simply stops on that screen and waits). The tail
-*& in FORM BUILD_BDC_TAIL covers the Customizing request popup and the
-*& way back out of the transaction - verify it against your own SHDB
-*& recording, which must be recorded through to leaving SCAL.
+*& in FORM BUILD_BDC_TAIL covers the information popup raised on save
+*& and the way back out of the transaction - verify it against your own
+*& SHDB recording, which must be recorded through to leaving SCAL.
+*&
+*& The popup's program and screen are entered on the selection screen
+*& (P_PPROG / P_PDYNP); the result list reports them in "Stopped on".
 *&---------------------------------------------------------------------*
 
 REPORT zfc_upload_special_rule.
@@ -74,6 +77,9 @@ SELECTION-SCREEN END OF BLOCK b2.
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-003.
 
 PARAMETERS:
+  p_pprog TYPE bdcdata-program,
+  p_pdynp TYPE bdcdata-dynpro,
+  p_pokcd TYPE char20 DEFAULT '/00',
   p_trkorr TYPE trkorr,
   p_exit   AS CHECKBOX DEFAULT 'X'.
 
@@ -939,12 +945,46 @@ ENDFORM.
 FORM build_bdc_tail.
 
 *---------------------------------------------------------------------*
+* Information popup on save
+*
+*   "Transporting the holiday and factory calendar
+*    The automatic recording of customizing changes does not include
+*    the holiday and factory calendar. ..."
+*
+* It only has to be acknowledged - ENTER ('/00') is what the green
+* check does. The popup is a modal dialog of its own program, and that
+* program and screen number differ between releases, so they are not
+* hard-coded here:
+*
+*   1. Run one row with P_MODE = 'N' and P_PPROG / P_PDYNP empty.
+*   2. Read the "Stopped on" column of the result list - it reports the
+*      popup's program and screen from message 00 344.
+*   3. Type those two values into P_PPROG and P_PDYNP and run again.
+*
+* No program change is needed for this. If your system raises more than
+* one popup, add the further screens as extra blocks below.
+*---------------------------------------------------------------------*
+  IF p_pprog IS NOT INITIAL
+     AND p_pdynp IS NOT INITIAL.
+
+    PERFORM bdc_dynpro USING p_pprog p_pdynp.
+    PERFORM bdc_field  USING 'BDC_OKCODE' p_pokcd.
+
+  ENDIF.
+
+*---------------------------------------------------------------------*
 * Prompt for Customizing request
 *
-* The factory calendar is cross-client Customizing, so a client with
-* automatic recording of changes asks for a transport request on save.
-* Leave P_TRKORR empty if your client does not record changes - the
-* popup is then not raised and must not be in the BDC either.
+* Normally NOT raised: the popup quoted above states that the automatic
+* recording of Customizing changes does not cover the holiday and
+* factory calendar - the calendar has its own transport connection
+* (Calendar -> Transport on the SCAL initial screen), so saving a
+* special rule does not ask for a request.
+*
+* P_TRKORR should therefore stay empty. It is kept only for systems
+* that were modified to record the calendar; filling it in a system
+* that does not raise the popup inserts a screen that is never shown,
+* which breaks the run just as surely as a missing one.
 *---------------------------------------------------------------------*
   IF p_trkorr IS NOT INITIAL.
 

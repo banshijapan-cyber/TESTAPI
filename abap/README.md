@@ -92,7 +92,10 @@ Row 1 is a header (configurable via *Header rows*), data starts in row 2.
 | `P_MODE` | Display mode for `CALL TRANSACTION`: `A` / `E` / `N` |
 | `P_UPDT` | Update mode: `S` synchronous, `A` asynchronous, `L` local |
 | `P_GROUP` | Batch input session name |
-| `P_TRKORR` | Customizing request for the save popup (blank = no popup expected) |
+| `P_PPROG` | Program of the information popup raised on save |
+| `P_PDYNP` | Screen number of that popup |
+| `P_POKCD` | OK code to acknowledge it (default `/00` = ENTER) |
+| `P_TRKORR` | Customizing request — normally leave empty, see below |
 | `P_EXIT` | Append the screens that leave the transaction after the save |
 
 Start with `P_TEST`, then `P_CALL` with `P_MODE = 'A'` on a single row to
@@ -125,20 +128,46 @@ screen, so the run just halts there and waits for you.
 
 The original recording ended on `=SAVE`. Everything SCAL still shows
 after that had no BDC data, which produces exactly those two symptoms.
-`FORM build_bdc_tail` now supplies it:
+`FORM build_bdc_tail` supplies it:
 
-1. **Prompt for Customizing request** (`SAPLSTRD` screen `0300`). The
-   factory calendar is cross-client Customizing, so a client that
-   records changes asks for a transport request on save — and a
-   background job cannot answer it. Enter the request in `P_TRKORR`.
-   If your client does *not* record changes the popup is never raised
-   and `P_TRKORR` must stay empty, otherwise the extra screen becomes
-   the mismatch.
+1. **The information popup raised on save** — *"Transporting the
+   holiday and factory calendar / The automatic recording of
+   customizing changes does not include the holiday and factory
+   calendar..."*. It only needs acknowledging, which `/00` (ENTER,
+   what the green check does) handles. See below for filling in
+   `P_PPROG` / `P_PDYNP`.
 2. **The way back out** — `0210` → `0200` → the calendar list → `0100`,
    controlled by `P_EXIT`.
 
-The screen numbers and OK codes in that tail are release-dependent and
-are a best guess. Verify them against your own recording.
+The screen numbers and OK codes in the back-out chain are
+release-dependent and are a best guess. Verify them against your own
+recording.
+
+### The popup on save — and why there is no transport request
+
+That popup is a modal dialog belonging to its own program, and the
+program and screen number differ between releases, so they are entered
+on the selection screen rather than hard-coded:
+
+1. Run one row with `P_MODE = 'N'` and `P_PPROG` / `P_PDYNP` empty.
+2. Read the **Stopped on** column of the result list — it reports the
+   popup's program and screen, taken from message `00 344`.
+3. Type those two values into `P_PPROG` and `P_PDYNP` and run again.
+
+No program change is needed. If your system raises more than one
+popup, add the further screens as extra blocks in `build_bdc_tail`.
+
+Note what that popup actually says: the automatic recording of
+Customizing changes **does not cover** the holiday and factory
+calendar — it has its own transport connection (*Calendar → Transport*
+on the SCAL initial screen). So saving a special rule does **not**
+prompt for a Customizing request, and `P_TRKORR` should stay empty.
+Filling it inserts a screen that is never shown, which breaks the run
+exactly as a missing screen does. It is kept only for systems that were
+modified to record the calendar.
+
+Transporting the uploaded rules is a separate manual step: *Calendar →
+Transport* on the SCAL initial screen, after the upload.
 
 ### Finding the screen it actually stopped on
 
