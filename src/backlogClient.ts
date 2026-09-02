@@ -74,6 +74,10 @@ export class BacklogClient {
     return this.request("/projects");
   }
 
+  getProject(projectIdOrKey: string | number): Promise<BacklogProject> {
+    return this.request(`/projects/${encodeURIComponent(String(projectIdOrKey))}`);
+  }
+
   getIssues(params: GetIssuesParams = {}): Promise<BacklogIssue[]> {
     return this.request("/issues", params);
   }

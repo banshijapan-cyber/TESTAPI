@@ -48,3 +48,10 @@ const issues = await client.getIssues({ projectId: [projects[0].id] });
 - `npm run dev` — run directly with `tsx`
 - `npm run build` — compile to `dist/`
 - `npm start` — run the compiled build
+- `npm run due-today [PROJECT_KEY]` — list open issues due today in a project (defaults to `NEO`)
+
+Example:
+
+```sh
+npm run due-today NEO
+```
