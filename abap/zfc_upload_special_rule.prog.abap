@@ -95,7 +95,7 @@ SELECTION-SCREEN END OF BLOCK b2.
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE text-003.
 
 PARAMETERS:
-  p_fsel  AS CHECKBOX,
+  p_rec200 AS CHECKBOX,
   p_pprog TYPE bdcdata-program DEFAULT 'SAPMSSY0',
   p_pdynp TYPE bdcdata-dynpro  DEFAULT '0120',
   p_pokcd TYPE char20          DEFAULT '=DBAC',
@@ -840,12 +840,11 @@ ENDFORM.
 *---------------------------------------------------------------------*
 * Build the SCAL BDC for one row
 *
-* Taken from the SHDB recording of 2026 01 06 - 2026 01 08 on calendar
-* A1, with two deliberate differences, both marked below:
+* Follows the SHDB recording of 2026 01 06 - 2026 01 08 on calendar A1
+* screen for screen and OK code for OK code.
 *
-*   - the header fields the recording captured on screen 0200 are NOT
-*     replayed (they would overwrite the calendar definition),
-*   - the no-op double click (=&IC1) on the unfiltered list is dropped.
+* The only field values not sent unconditionally are the screen 0200
+* header fields - see FORM BDC_FIELDS_0200 and P_REC200.
 *---------------------------------------------------------------------*
 FORM build_bdc
   USING
@@ -882,39 +881,19 @@ FORM build_bdc
   PERFORM bdc_field  USING 'FMEN-FABKAL'   'X'.
 
 *---------------------------------------------------------------------*
-* Calendar list - set filter
+* Calendar list - recording lines 7 to 12
 *
-* The recording has an extra =&IC1 (double click) on this screen before
-* =&ILT. It navigated nowhere there - the next recorded screen is 0120
-* again - but a double click on a list is "choose": with a different
-* list content the same cursor position can open a calendar, and the
-* run would then be one screen out of step. It is left out.
+* Both 0120 screens are sent as recorded, the =&IC1 double click
+* included. There is no SAPLSKBH 0830 filter-field popup in this
+* recording, so none is built.
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SAPMSSY0' '0120'.
   PERFORM bdc_field  USING 'BDC_CURSOR' gc_cur_unfiltered.
+  PERFORM bdc_field  USING 'BDC_OKCODE' '=&IC1'.
+
+  PERFORM bdc_dynpro USING 'SAPMSSY0' '0120'.
+  PERFORM bdc_field  USING 'BDC_CURSOR' gc_cur_unfiltered.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=&ILT'.
-
-*---------------------------------------------------------------------*
-* Choose the filter field
-*
-* The recording goes straight from =&ILT to the selection dialog,
-* because the filter field was already set from an earlier run - ALV
-* keeps that per user. On a user who has never filtered this list, the
-* field selection popup comes first. Switch P_FSEL on in that case;
-* the result list names SAPLSKBH 0830 in "Stopped on" when it happens.
-*---------------------------------------------------------------------*
-  IF p_fsel = abap_true.
-
-    PERFORM bdc_dynpro USING 'SAPLSKBH' '0830'.
-    PERFORM bdc_field  USING 'BDC_CURSOR' 'GT_FIELD_LIST-SELTEXT(01)'.
-    PERFORM bdc_field  USING 'BDC_OKCODE' '=WLSE'.
-    PERFORM bdc_field  USING 'GT_FIELD_LIST-MARK(01)' 'X'.
-
-    PERFORM bdc_dynpro USING 'SAPLSKBH' '0830'.
-    PERFORM bdc_field  USING 'BDC_CURSOR' 'GT_FIELD_LIST-SELTEXT(01)'.
-    PERFORM bdc_field  USING 'BDC_OKCODE' '=CONT'.
-
-  ENDIF.
 
 *---------------------------------------------------------------------*
 * Filter value = calendar ID
@@ -939,22 +918,12 @@ FORM build_bdc
   PERFORM bdc_field  USING 'BDC_OKCODE' '=UPDA'.
 
 *---------------------------------------------------------------------*
-* Calendar definition -> special rules
-*
-* The recording also carries TFACT-LTEXT, TFACD-VJAHR, TFACD-BJAHR,
-* TFACD-HOCID, TFACD-BASIS and TIFAB-MONTAG..FEIERTAG here. SHDB
-* records every input-ready field on the screen, not only the ones that
-* were typed, so those are the values of calendar A1 at recording time:
-* validity 2000-2099, holiday calendar JP, basis 989, Mon-Fri working.
-*
-* Replaying them would write A1's definition into every calendar the
-* upload touches. They are deliberately NOT sent - a field that is not
-* supplied keeps the value the screen already holds, which is what is
-* wanted when only a special rule is being added.
+* Calendar definition -> special rules - recording lines 21 to 36
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0200'.
   PERFORM bdc_field  USING 'BDC_CURSOR' 'TFACT-LTEXT'.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=SRUL'.
+  PERFORM bdc_fields_0200.
 
 *---------------------------------------------------------------------*
 * Special rules - insert
@@ -992,6 +961,51 @@ FORM build_bdc
   PERFORM bdc_field  USING 'BDC_OKCODE' '=SAVE'.
 
   PERFORM build_bdc_tail.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Header fields the recording captured on screen 0200
+*
+*   TFACT-LTEXT 016026LT1   TFACD-VJAHR 2000   TFACD-BJAHR 2099
+*   TFACD-HOCID JP          TFACD-BASIS 989
+*   TIFAB-MONTAG..FREITAG X   SAMSTAG / SONNTAG / FEIERTAG blank
+*
+* SHDB records every input-ready field on a screen, not only the ones
+* that were typed, so these are the DEFINITION OF CALENDAR A1 at
+* recording time - validity 2000-2099, holiday calendar JP, basis 989,
+* Monday to Friday working.
+*
+* Sent only when P_REC200 is ticked, because sending them writes A1's
+* definition into whichever calendar the row is for. On A1 itself that
+* is harmless; on any other calendar it silently replaces the validity
+* period, the holiday calendar, the basis and the working week. Leaving
+* them out cannot break the run - an unsupplied field keeps the value
+* the screen already holds, and the screen sequence is unaffected.
+*
+* The recording writes the three non-working checkboxes as '_'. That is
+* how SHDB shows an unticked checkbox; a literal underscore is not
+* blank, and on a checkbox any non-blank value counts as ticked, which
+* would turn Saturday, Sunday and holidays into working days. They are
+* therefore sent as SPACE.
+*---------------------------------------------------------------------*
+FORM bdc_fields_0200.
+
+  CHECK p_rec200 = abap_true.
+
+  PERFORM bdc_field USING 'TFACT-LTEXT'      '016026LT1'.
+  PERFORM bdc_field USING 'TFACD-VJAHR'      '2000'.
+  PERFORM bdc_field USING 'TFACD-BJAHR'      '2099'.
+  PERFORM bdc_field USING 'TFACD-HOCID'      'JP'.
+  PERFORM bdc_field USING 'TFACD-BASIS'      '989'.
+  PERFORM bdc_field USING 'TIFAB-MONTAG'     'X'.
+  PERFORM bdc_field USING 'TIFAB-DIENSTAG'   'X'.
+  PERFORM bdc_field USING 'TIFAB-MITTWOCH'   'X'.
+  PERFORM bdc_field USING 'TIFAB-DONNERSTAG' 'X'.
+  PERFORM bdc_field USING 'TIFAB-FREITAG'    'X'.
+  PERFORM bdc_field USING 'TIFAB-SAMSTAG'    space.
+  PERFORM bdc_field USING 'TIFAB-SONNTAG'    space.
+  PERFORM bdc_field USING 'TIFAB-FEIERTAG'   space.
 
 ENDFORM.
 
@@ -1046,14 +1060,16 @@ FORM build_bdc_tail.
     PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0200'.
     PERFORM bdc_field  USING 'BDC_CURSOR' 'TFACT-LTEXT'.
     PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
+    PERFORM bdc_fields_0200.
 
     PERFORM bdc_dynpro USING 'SAPMSSY0' '0120'.
     PERFORM bdc_field  USING 'BDC_CURSOR' gc_cur_filtered.
     PERFORM bdc_field  USING 'BDC_OKCODE' '=&F03'.
 
     PERFORM bdc_dynpro USING 'SAPMSFT0' '0100'.
-    PERFORM bdc_field  USING 'BDC_CURSOR' 'TEXT_01_CALENDAR'.
-    PERFORM bdc_field  USING 'BDC_OKCODE' '=BACK'.
+    PERFORM bdc_field  USING 'BDC_CURSOR'  'TEXT_01_CALENDAR'.
+    PERFORM bdc_field  USING 'BDC_OKCODE'  '=BACK'.
+    PERFORM bdc_field  USING 'FMEN-FABKAL' 'X'.
 
   ENDIF.
 

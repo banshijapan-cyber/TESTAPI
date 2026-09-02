@@ -97,7 +97,7 @@ Row 1 is a header (configurable via *Header rows*), data starts in row 2.
 | `P_MODE` | Display mode for `CALL TRANSACTION`: `A` / `E` / `N` |
 | `P_UPDT` | Update mode: `S` synchronous, `A` asynchronous, `L` local |
 | `P_GROUP` | Batch input session name |
-| `P_FSEL` | Tick if `=&ILT` shows the *choose filter field* popup first |
+| `P_REC200` | Send the screen `0200` header fields as recorded — see below |
 | `P_PPROG` | Program of the information popup raised on save (`SAPMSSY0`) |
 | `P_PDYNP` | Screen number of that popup (`0120`) |
 | `P_POKCD` | OK code to acknowledge it (`=DBAC`) |
@@ -173,15 +173,15 @@ green-arrow back out until you are on the SAP menu. Then replace the
 `bdc_dynpro` / `bdc_field` blocks in `build_bdc` and `build_bdc_tail`
 with what was recorded — but read the next section first.
 
-## Two things not to copy from a recording verbatim
+## The one field group that is not sent unconditionally
 
-`SHDB` records **every input-ready field on the screen**, not only the
-ones you typed. Two entries in the supplied recording must not be
-replayed as-is, and both are deliberately left out of the program.
+The BDC follows the recording screen for screen and OK code for OK
+code — all 14 screens, including the `=&IC1` double click on the
+unfiltered list. There is no `SAPLSKBH 0830` filter-field popup in the
+recording, so none is built.
 
-### 1. The header fields on screen 0200 — the dangerous one
-
-The recording carries this on `SZC_FACTORY_CALENDAR_MAINTAIN` `0200`:
+The single exception is the block of header fields the recording
+captured on `SZC_FACTORY_CALENDAR_MAINTAIN` `0200`:
 
 ```
 TFACT-LTEXT        016026LT1
@@ -193,32 +193,34 @@ TIFAB-MONTAG       X      ... TIFAB-FREITAG  X
 TIFAB-SAMSTAG      _      TIFAB-SONNTAG  _   TIFAB-FEIERTAG  _
 ```
 
-That is the **definition of calendar A1** at recording time — validity
-2000–2099, holiday calendar JP, basis 989, Monday–Friday working.
-Sending it on every row would write A1's definition into every calendar
-the upload touches: wrong validity period, wrong holiday calendar,
-wrong working-week pattern, silently, on calendars you only meant to
-add one special rule to.
+`SHDB` records **every input-ready field on the screen**, not only the
+ones you typed, so that is the **definition of calendar A1** at
+recording time — validity 2000–2099, holiday calendar JP, basis 989,
+Monday–Friday working.
 
-Only `BDC_CURSOR` and `BDC_OKCODE = '=SRUL'` are sent. A field that is
-not supplied keeps whatever the screen already holds, which is exactly
-what is wanted. The same applies to the second `0200` in the back-out
-chain.
+Sending it writes A1's definition into whichever calendar the row is
+for. On A1 itself that is harmless; on any other calendar it silently
+replaces the validity period, the holiday calendar, the basis and the
+working week — on a run that was only supposed to add one special rule.
 
-### 2. The `=&IC1` double click on the unfiltered list
+So it sits behind **`P_REC200`**, unticked by default. Tick it for a
+literal 1:1 replay of the recording. Leaving it off cannot break the
+run: an unsupplied field keeps the value the screen already holds, and
+the screen sequence is unaffected either way.
 
-The recording has an extra `=&IC1` on `SAPMSSY0` `0120` at cursor
-`02/05` before `=&ILT`. It navigated nowhere there — the next recorded
-screen is `0120` again — but `&IC1` is *choose*, and with different
-list content the same cursor position can open a calendar, putting the
-run one screen out of step. It is left out.
+One detail if you do tick it — the recording writes the three
+non-working checkboxes as `_`. That is how `SHDB` shows an unticked
+checkbox; a literal underscore is not blank, and on a checkbox any
+non-blank value counts as ticked, which would turn Saturday, Sunday
+and holidays into working days. They are sent as `SPACE`.
 
 ## Fragile spots to watch
 
 | Spot | Why | Where |
 | --- | --- | --- |
 | `GC_CUR_FILTERED` = `04/03` | The cursor decides **which line** `=UPDA` opens. That is the whole reason the list is filtered by calendar ID first — with one line left, the data line sits at `04/03`. A wrong position opens the wrong calendar. | constant |
-| The filter field popup | The recording goes straight from `=&ILT` to the selection dialog because the filter field was already set from an earlier run — ALV keeps that per user. A user who has never filtered this list gets `SAPLSKBH 0830` first. Tick `P_FSEL`; **Stopped on** reports `SAPLSKBH 0830` when it happens. | `P_FSEL` |
+| The filter field popup | The recording goes straight from `=&ILT` to the selection dialog because the filter field was already set from an earlier run — ALV keeps that per user. A user who has never filtered this list may get `SAPLSKBH 0830` first, which is not in the recording. **Stopped on** reports it if it happens; re-record as that user. | — |
+| `=&IC1` on the unfiltered list | Sent as recorded. It navigated nowhere in the recording, but `&IC1` is *choose* — if a run ever ends up one screen out of step here, this is the first thing to look at. | `build_bdc` |
 | Row index `(01)` | Assumes the newly inserted rule is the first line of the table control. | `build_bdc` |
 | Date format | The recording shows `2026.01.06`, i.e. the recording user has date format `4` (`YYYY.MM.DD`). Dates are converted with the **running** user's format, so this is not hard-coded. A batch input session runs under `SY-UNAME`, which is why `BDC_OPEN_GROUP` is called with it — a session processed under a user with a different date format would misread the dates. | `convert_date_external` |
 
