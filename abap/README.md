@@ -45,29 +45,21 @@ left to trip over.
 | Processing mode | `MODE 'E'` was hard-coded ("intentionally while testing"). | Selection-screen parameters for display mode, update mode, and a batch-input-session alternative. |
 | Row validation | Rows with an unconvertible date were silently reported as "blank". | The conversion error text is carried into the ALV. |
 
-## Known gap: the workday flag
+## The workday flag
 
-Column D of the template is read and shown in the ALV, but the
-recording never touches the workday / non-workday indicator, so every
-rule is created with the screen default.
+Column D goes to **`TIFAB-ARBTAG`** on screen `0215` — `X` for a
+working day, blank for non-working.
 
-The recording settles **where** it is: not on `0215`, which carries
-only `TIFAB-DATUMVON`, `TIFAB-DATUMBIS` and `TFAIT-LTEXT`. It is a
-column of the special rules table control on screen `0210`, so the
-field name needs the row index of the inserted rule.
+It is missing from the first recording only because that rule was
+recorded as non-working: `SHDB` does not write out a checkbox that was
+never touched, so the field never appeared. The second recording, made
+with *Workday* ticked, is identical apart from `TIFAB-ARBTAG X` on line
+45 (and two cursor positions, which do not matter).
 
-To close it:
-
-1. Put the cursor on the **Workday** column of the special rules list
-   and press `F1` → *Technical information* to read the field name.
-2. Put it into `gc_fld_workday` at the top of the program, with the row
-   index — e.g. `TIFAB-XXXXX(01)`.
-
-It is then sent on screen `0210` just before `=SAVE`.
-
-Until then the ALV flags any row with `Workday = X` as a `WARNING`, in
-both simulation and update runs, so the gap is visible rather than
-silent.
+The program sends it on **every** row, blank included, rather than only
+when the column is ticked — an explicit blank states "non-working"
+instead of relying on whatever the freshly opened screen defaults to.
+The result list says which of the two was created.
 
 ## Excel template
 
@@ -77,6 +69,10 @@ Row 1 is a header (configurable via *Header rows*), data starts in row 2.
 | --- | --- | --- | --- | --- |
 | Calendar ID | From Date | To Date | Workday | Text |
 | `A1` | `20270103` | `20270103` | `X` | `Special Holiday BDC` |
+
+`X` in column D creates the rule as a **working day**
+(`TIFAB-ARBTAG = X`); blank creates it as **non-working**. `1` and
+`YES` are accepted as `X`.
 
 - Dates are `YYYYMMDD`. Format the column as **text** in Excel so the
   leading value is not turned into a number.
@@ -222,6 +218,7 @@ and holidays into working days. They are sent as `SPACE`.
 | The filter field popup | The recording goes straight from `=&ILT` to the selection dialog because the filter field was already set from an earlier run — ALV keeps that per user. A user who has never filtered this list may get `SAPLSKBH 0830` first, which is not in the recording. **Stopped on** reports it if it happens; re-record as that user. | — |
 | `=&IC1` on the unfiltered list | Sent as recorded. It navigated nowhere in the recording, but `&IC1` is *choose* — if a run ever ends up one screen out of step here, this is the first thing to look at. | `build_bdc` |
 | Row index `(01)` | Assumes the newly inserted rule is the first line of the table control. | `build_bdc` |
+| Untouched fields are invisible | A recording only shows what was typed. `TIFAB-ARBTAG` was absent from the first recording for exactly that reason. If something else is not being set, record it once with the value changed and diff the two recordings. | — |
 | Date format | The recording shows `2026.01.06`, i.e. the recording user has date format `4` (`YYYY.MM.DD`). Dates are converted with the **running** user's format, so this is not hard-coded. A batch input session runs under `SY-UNAME`, which is why `BDC_OPEN_GROUP` is called with it — a session processed under a user with a different date format would misread the dates. | `convert_date_external` |
 
 ### For background runs, prefer the session

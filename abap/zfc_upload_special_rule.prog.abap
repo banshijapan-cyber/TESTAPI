@@ -8,7 +8,7 @@
 *&   Column A = Calendar ID
 *&   Column B = From Date   YYYYMMDD
 *&   Column C = To Date     YYYYMMDD
-*&   Column D = Workday     X / blank
+*&   Column D = Workday     X = working day, blank = non-working
 *&   Column E = Text
 *&
 *& Example:
@@ -47,19 +47,6 @@ REPORT zfc_upload_special_rule.
 *---------------------------------------------------------------------*
 CONSTANTS:
   gc_tcode       TYPE tcode        VALUE 'SCAL',
-
-* Field that carries the workday indicator.
-*
-* The recording proves it is not on screen 0215 - that screen has only
-* the two dates and the text. It is a column of the special rules table
-* control on screen 0210, so the name needs the row index of the newly
-* inserted rule, e.g. 'TIFAB-XXXXX(01)'. Put the cursor on the workday
-* column of the special rules list and press F1 -> Technical
-* information to read the field name.
-*
-* Until this is filled in, column D of the template cannot be
-* transferred and affected rows are flagged as WARNING.
-  gc_fld_workday   TYPE bdcdata-fnam VALUE IS INITIAL,
 
 * Cursor positions in the calendar list (SAPMSSY0 0120). The second one
 * decides which line =UPDA opens in change mode, so it has to point at
@@ -742,14 +729,6 @@ FORM validate_and_process.
         gs_result-message =
           'Special rule already exists. No BDC executed.'.
 
-      ELSEIF gs_input-workday = 'X'
-             AND gc_fld_workday IS INITIAL.
-
-        gs_result-status  = 'WARNING'.
-        gs_result-message =
-          'Valid, but the recording has no workday field ' &&
-          '- the rule would be created as non-working.'.
-
       ELSE.
 
         gs_result-status  = 'OK'.
@@ -812,23 +791,19 @@ FORM validate_and_process.
       IF lv_success = abap_true.
         gs_result-action  = 'Created'.
         gs_result-status  = 'SUCCESS'.
-        gs_result-message =
-          'Special rule created through SCAL BDC.'.
+        IF gs_input-workday = 'X'.
+          gs_result-message =
+            'Special rule created through SCAL BDC as a workday.'.
+        ELSE.
+          gs_result-message =
+            'Special rule created through SCAL BDC as non-working.'.
+        ENDIF.
       ELSE.
         gs_result-action = 'BDC Error'.
         gs_result-status = 'ERROR'.
         gs_result-message = lv_message.
       ENDIF.
 
-    ENDIF.
-
-    IF gs_result-status = 'SUCCESS'
-       AND gs_input-workday = 'X'
-       AND gc_fld_workday IS INITIAL.
-      gs_result-status  = 'WARNING'.
-      gs_result-message =
-        'Created, but the recording has no workday field ' &&
-        '- check the day type in SCAL.'.
     ENDIF.
 
     APPEND gs_result TO gt_result.
@@ -929,35 +904,34 @@ FORM build_bdc
 * Special rules - insert
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0210'.
-  PERFORM bdc_field  USING 'BDC_CURSOR' 'TFACT-LTEXT'.
+  PERFORM bdc_field  USING 'BDC_CURSOR' 'TIFAB-DATUMVON(01)'.
   PERFORM bdc_field  USING 'BDC_OKCODE' '=INS'.
 
 *---------------------------------------------------------------------*
-* Insert special rule
+* Insert special rule - recording lines 40 to 46
+*
+* TIFAB-ARBTAG is the workday indicator, and it IS on this screen - the
+* first recording simply did not contain it, because that rule was
+* recorded as non-working and SHDB does not write out an untouched
+* checkbox. Column D of the template goes here.
+*
+* It is sent on every row, blank included, rather than only when the
+* column is ticked: an explicit blank states "non-working" instead of
+* relying on whatever the freshly opened screen happens to default to.
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0215'.
-  PERFORM bdc_field  USING 'BDC_CURSOR'     'TFAIT-LTEXT'.
+  PERFORM bdc_field  USING 'BDC_CURSOR'     'TIFAB-DATUMBIS'.
   PERFORM bdc_field  USING 'BDC_OKCODE'     '=RINS'.
   PERFORM bdc_field  USING 'TIFAB-DATUMVON' lv_from_ext.
   PERFORM bdc_field  USING 'TIFAB-DATUMBIS' lv_to_ext.
+  PERFORM bdc_field  USING 'TIFAB-ARBTAG'   is_input-workday.
   PERFORM bdc_field  USING 'TFAIT-LTEXT'    is_input-text.
 
 *---------------------------------------------------------------------*
 * Special rules - save
-*
-* This is where the workday indicator belongs: the recording proves it
-* is not on screen 0215, which carries only the two dates and the text.
-* It is a column of the special rules table control on 0210, so the
-* field name needs the row index, e.g. TIFAB-XXXXX(01). See
-* GC_FLD_WORKDAY at the top.
 *---------------------------------------------------------------------*
   PERFORM bdc_dynpro USING 'SZC_FACTORY_CALENDAR_MAINTAIN' '0210'.
   PERFORM bdc_field  USING 'BDC_CURSOR' 'TIFAB-DATUMVON(01)'.
-
-  IF gc_fld_workday IS NOT INITIAL.
-    PERFORM bdc_field USING gc_fld_workday is_input-workday.
-  ENDIF.
-
   PERFORM bdc_field  USING 'BDC_OKCODE' '=SAVE'.
 
   PERFORM build_bdc_tail.
